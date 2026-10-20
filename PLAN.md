@@ -2,142 +2,138 @@
 
 ## 1. Goal
 
-Build a modular, testable algorithmic trading bot that can:
+A personal, fully automated **intraday** bot that trades **Nasdaq 100 (NQ)** and **S&P 500 (ES)**. It runs first on a demo account and later on a **prop-firm funded account on MT5** (e.g. Alpha Capital Group).
 
-1. Ingest market data (historical and live).
-2. Generate signals from pluggable strategies.
-3. Size positions and enforce risk limits.
-4. Execute orders through a broker/exchange API.
-5. Backtest and paper-trade the *same* code path before any real money is used.
+Path to production: **backtest → demo forward test → funded challenge → funded account**. Every stage uses the same strategy, risk and execution code.
 
-Guiding principle: **safety first**. Every strategy goes backtest → paper trading → small live allocation. Live trading is opt-in, gated by config, and protected by hard risk limits and a kill switch.
+## 2. Decisions
 
-## 2. Proposed Defaults (open to change — see §9)
-
-| Decision | Default | Why |
+| Topic | Decision | Notes |
 |---|---|---|
-| Language | Python 3.12 | Best ecosystem for data/quant (pandas, numpy, ta libs) |
-| First market | US equities/ETFs via **Alpaca** | Free paper trading, simple REST + websocket API |
-| Alt. market | Crypto via **ccxt** (Binance/Coinbase/Kraken) | 24/7 markets, one library for many exchanges |
-| Timeframe | 1-min to daily bars (no HFT) | Realistic for a retail bot |
-| Storage | SQLite → Postgres later; Parquet for bar history | Zero-setup to start |
-| Config | YAML + `.env` for secrets | Secrets never committed |
-| Deployment | Docker container on a small VPS | Simple, reproducible |
+| Instruments | NQ + ES only | On MT5 prop accounts these are **index CFDs** (symbol names vary by broker: `NAS100`/`US100`/`USTEC`, `US500`/`SPX500`). Mapped in config. |
+| Style | Intraday only, **flat before the session close** | Avoids overnight swap/financing charges and gap risk. |
+| Language | Python 3.12 | One codebase for research, backtests and live trading. |
+| Execution platform | **MetaTrader 5** via the official `MetaTrader5` Python package | The same adapter works for demo and funded accounts; only login credentials change. |
+| Demo trading | **MT5 demo account** (not TradingView Paper Trading) | TradingView doesn't let outside programs place orders in its Paper Trading account. An MT5 demo matches the funded setup (same platform, symbols, spreads, order types), so demo results carry over. |
+| TradingView's role | Charting + visual check | Optional Pine Script indicator that draws the bot's levels/signals so you can eyeball them on TradingView. |
+| Control / interface | **Telegram bot** | Trade alerts, daily P&L summary, `/status`, `/pause`, `/resume`, `/flatten` (kill switch) from your phone. Simplest and most useful for one user; a web dashboard can come later if wanted. |
+| Hosting | **Windows VPS** (~$10–30/mo) close to the broker's server | The `MetaTrader5` Python package only runs on Windows next to a running MT5 terminal, and the bot must run during market hours even when your PC is off. Development and backtesting run anywhere. |
+| Historical data | MT5 history of the broker's CFDs (M1 bars) to start; optionally Databento / FirstRate Data NQ/ES 1-min futures for longer history | Backtest on the same data feed you'll trade when possible. |
+| Timezone | All session logic in `America/New_York` | MT5 server time is usually GMT+2/+3, so conversion is handled centrally. |
 
-## 3. Architecture
+## 3. Recommended Strategies
+
+Intraday NQ/ES move most around the **New York open (9:30 ET)**, and that's where the best-documented simple edges are. Recommendation, in order:
+
+### 3.1 Opening Range Breakout (ORB) — primary
+- Define the range of the first 5/15/30 minutes after 9:30 ET.
+- Enter on a break of the range high/low (optionally requiring a candle close outside it).
+- Stop: other side of the range (or midpoint / ATR-based). Target: fixed R multiple, or trail and exit at close.
+- Filters to test: trend direction (price vs. VWAP / prior-day close), range width vs. ATR (skip huge or tiny ranges), day of week.
+- Max 1–2 trades per instrument per day.
+- Why: simple, rules-based, few parameters (less overfitting), well studied on Nasdaq/S&P, and easy to check visually.
+
+### 3.2 VWAP trend pullback — second
+- After 10:00 ET, if price is trending (above/below VWAP with a positive/negative VWAP slope), buy pullbacks to VWAP or a VWAP band in the trend direction.
+- Stop beyond the pullback swing / ATR; target prior high/low or band.
+- Gives the bot opportunities on days where ORB doesn't trigger or fails early.
+
+### 3.3 Later candidates (only after 3.1 and 3.2 are validated)
+- Intraday momentum with "noise-area" boundaries (volatility-scaled bands around the open).
+- Prior-day high/low and overnight high/low breakout/rejection.
+
+**Common filters for all strategies**
+- No new entries in a window around high-impact news (CPI, FOMC, NFP, etc.) via an economic calendar. Many prop firms restrict news trading anyway.
+- Trading window e.g. 9:30–15:30 ET; force-flat at ~15:50 ET.
+
+We validate each strategy with out-of-sample / walk-forward tests before it goes near a demo account. If it doesn't hold up, we don't trade it.
+
+## 4. Prop-Firm-Aware Risk Management (non-negotiable)
+
+Prop accounts fail on rule breaches, not just losses, so the bot enforces the firm's rules **with a safety buffer**:
+
+- **Risk per trade**: 0.25–0.5% of the account, sized from stop distance and the CFD's contract size/tick value.
+- **Daily loss limit**: bot stops trading at ~50–60% of the firm's daily limit (configurable), flattens and pauses until the next day.
+- **Max drawdown**: tracks the firm's drawdown definition (static vs. trailing, balance vs. equity) and halts well before it.
+- **Max trades per day** and **max simultaneous positions** (e.g. one per instrument; NQ and ES are highly correlated, so combined exposure is capped).
+- **Consistency / profit target logic**: optional stop for the day after a big win (helps with consistency rules).
+- **Runaway protection**: max orders per minute, reject duplicate orders, verify broker positions match internal state (reconciliation).
+- **Kill switch**: Telegram `/flatten`, a CLI command, and an automatic trigger on connection loss beyond N seconds while in a position.
+- **Live-mode gate**: real-money/funded mode requires both a config setting and an environment flag.
+
+> Before buying the funded account: confirm the firm's current rules for the exact program (EAs/bots allowed?, daily/max drawdown definitions, news rules, minimum trading days, consistency rules, max lot size). These go into `config/prop_rules.yaml` and the risk manager enforces them.
+
+## 5. Architecture
 
 ```
-            ┌──────────────┐
-            │  Data Feed   │  historical (CSV/Parquet/API) | live (websocket)
-            └──────┬───────┘
-                   │ bars / ticks (events)
-            ┌──────▼───────┐
-            │   Strategy   │  pluggable: on_bar(bar) -> Signal
-            └──────┬───────┘
-                   │ signals
-            ┌──────▼───────┐
-            │ Risk Manager │  position sizing, max exposure, daily loss limit
-            └──────┬───────┘
-                   │ approved orders
-            ┌──────▼───────┐
-            │   Broker     │  SimBroker (backtest) | PaperBroker | LiveBroker
-            └──────┬───────┘
-                   │ fills
-            ┌──────▼───────┐
-            │  Portfolio   │  positions, cash, PnL, equity curve
-            └──────────────┘
-     Cross-cutting: config, logging, persistence, metrics, alerts
+  MT5 terminal ◄────────────────────────────────────────────┐
+     │ bars/ticks (live)                                     │ orders / positions
+┌────▼──────────┐   ┌───────────┐   ┌──────────────┐   ┌─────┴────────┐
+│  Data Feed    ├──►│ Strategy  ├──►│ Risk Manager ├──►│   Broker     │
+│ MT5 | CSV     │   │ ORB, VWAP │   │ + prop rules │   │ Sim | MT5    │
+└───────────────┘   └───────────┘   └──────────────┘   └──────┬───────┘
+                                                              │ fills
+                         Telegram ◄── Portfolio / PnL / State ◄┘
 ```
 
-Key design choice: an **event-driven engine** where the backtester and the live runner share the same `Strategy`, `RiskManager` and `Portfolio` code — only the `DataFeed` and `Broker` implementations are swapped. This avoids "works in backtest, breaks live" bugs.
+The backtester and live runner share `Strategy`, `RiskManager` and `Portfolio`; only `DataFeed` and `Broker` change (Sim ↔ MT5). This prevents "works in backtest, breaks live" bugs.
 
-### Proposed layout
+### Layout
 
 ```
 tradingbot/
 ├── src/tradingbot/
-│   ├── core/          # events, models (Bar, Order, Fill, Position), engine loop
-│   ├── data/          # feeds: csv, parquet, alpaca, ccxt; data downloader
-│   ├── strategies/    # base.py + example strategies
-│   ├── risk/          # sizing + limits
-│   ├── execution/     # sim, paper, live brokers
-│   ├── portfolio/     # accounting & PnL
-│   ├── backtest/      # runner + metrics/report
-│   ├── live/          # live runner, scheduler, kill switch
-│   └── utils/         # config, logging, notifications
-├── config/            # example.yaml
+│   ├── core/        # models (Bar, Order, Fill, Position), events, engine, session clock
+│   ├── data/        # CSV/Parquet feed, MT5 feed, MT5 history exporter, news calendar
+│   ├── strategies/  # base.py, orb.py, vwap_pullback.py
+│   ├── indicators/  # VWAP, ATR, opening range, etc.
+│   ├── risk/        # sizing, limits, prop-firm rules
+│   ├── execution/   # sim_broker.py, mt5_broker.py
+│   ├── portfolio/   # accounting, PnL, equity
+│   ├── backtest/    # runner, cost model (spread/commission/slippage), metrics, reports
+│   ├── live/        # live runner, scheduler, reconciliation, kill switch
+│   └── notify/      # Telegram bot
+├── config/          # settings.example.yaml, prop_rules.example.yaml, symbols.yaml
+├── pine/            # optional TradingView indicator mirroring the strategy
 ├── tests/
-├── notebooks/         # research
-├── Dockerfile
 └── pyproject.toml
 ```
 
-## 4. Strategies (initial set)
+## 6. Backtesting
 
-Start simple and well understood; the point is to validate the infrastructure, not to find alpha on day one.
-
-1. **SMA crossover** (trend following) — baseline / smoke test.
-2. **RSI mean reversion** — buy oversold, sell overbought, with a trend filter.
-3. **Donchian breakout** — classic channel breakout with ATR-based stops.
-
-Each strategy implements a small interface:
-
-```python
-class Strategy(ABC):
-    def on_start(self, ctx): ...
-    def on_bar(self, bar: Bar, ctx) -> list[Signal]: ...
-    def on_fill(self, fill: Fill, ctx): ...
-```
-
-## 5. Risk Management (non-negotiable)
-
-- Position sizing: fixed-fractional (e.g. risk ≤1% of equity per trade) using ATR stops.
-- Max position size per symbol and max total gross exposure.
-- **Daily loss limit** → bot flattens positions and halts for the day.
-- Max drawdown circuit breaker → halts until manual reset.
-- Max orders per minute (runaway-loop protection).
-- Kill switch: file flag / CLI command / chat command that cancels all orders and flattens.
-- Live mode requires `mode: live` in config **and** an explicit env flag (`TRADINGBOT_LIVE=1`).
-
-## 6. Backtesting & Evaluation
-
-- Realistic simulation: commissions, slippage model, fill on next bar open (no look-ahead).
-- Metrics: total/annualized return, Sharpe, Sortino, max drawdown, win rate, profit factor, exposure, trade count.
-- Walk-forward / out-of-sample split to reduce overfitting.
-- Output: HTML/console report with equity curve and trade list.
+- M1 bars with **next-bar execution** (no look-ahead), spread + commission + slippage modelled per instrument.
+- Session-aware: opening range, VWAP reset, force-flat, holidays/half days.
+- Metrics: net P&L, profit factor, win rate, avg R, max drawdown, **worst day**, Sharpe, trades/day, and a **prop-challenge simulator** (how often would the strategy have passed or failed the challenge's rules from random start dates).
+- Walk-forward / out-of-sample split; parameter sweeps shown as heatmaps to pick *stable* parameter regions rather than the single best value.
 
 ## 7. Milestones
 
 | # | Milestone | Deliverable |
 |---|---|---|
-| M0 | Scaffolding | `pyproject.toml`, lint (ruff), type check (mypy), pytest, CI on GitHub Actions |
-| M1 | Core + data | Domain models, event engine, CSV/Parquet feed, historical data downloader |
-| M2 | Backtester | SimBroker, Portfolio, metrics, SMA crossover end-to-end backtest |
-| M3 | Risk | Risk manager with sizing + limits, unit-tested |
-| M4 | More strategies | RSI mean reversion, Donchian breakout, parameter sweep tool |
-| M5 | Paper trading | Alpaca (and/or ccxt testnet) feed + paper broker, live runner, state persistence |
-| M6 | Ops | Structured logging, Telegram/Discord alerts, kill switch, Docker, health checks |
-| M7 | Live (small) | Live broker behind safety gates, reconciliation with broker positions |
-| M8 | Extras (optional) | Web dashboard, more data sources, ML-based signals |
+| M0 | Scaffolding | `pyproject.toml`, ruff, mypy, pytest, GitHub Actions CI |
+| M1 | Core + data | Models, event engine, NY session clock, CSV/Parquet feed, MT5 history exporter |
+| M2 | Backtester | Sim broker with cost model, portfolio, metrics report |
+| M3 | Risk | Position sizing, daily/max-drawdown limits, prop rules, unit-tested |
+| M4 | ORB strategy | Implementation + research report (walk-forward, parameter stability, challenge pass-rate) |
+| M5 | VWAP pullback | Second strategy + combined portfolio backtest |
+| M6 | MT5 live adapter | MT5 feed + broker, reconciliation, live runner; **forward test on MT5 demo** for 3–4+ weeks |
+| M7 | Ops | Telegram control/alerts, kill switch, logging, auto-restart on the Windows VPS |
+| M8 | Funded challenge | Load the firm's rules into config, run on the challenge account |
+| M9 | Extras (optional) | Pine Script mirror indicator, web dashboard, more strategies |
 
-Run paper trading for at least a few weeks (M5–M6) before considering M7.
+## 8. Testing
 
-## 8. Testing Strategy
+- Unit tests for indicators, sizing, risk rules, portfolio accounting (deterministic, no network).
+- Golden-file backtests: fixed dataset → fixed trades/P&L, so refactors can't silently change results.
+- MT5 adapter tested against a mocked `MetaTrader5` module; manual check on the demo account.
+- CI runs lint, type checks and tests on every push.
 
-- Unit tests for models, risk rules, portfolio accounting (deterministic, no network).
-- Golden-file backtest tests: fixed dataset → fixed expected trades/PnL.
-- Broker adapters tested against recorded API responses (mocked).
-- CI runs lint + type check + tests on every push.
+## 9. Still To Confirm Later
 
-## 9. Open Questions
-
-1. **Market**: stocks (Alpaca), crypto (which exchange?), forex, or several?
-2. **Broker/exchange account**: which one do you already have / want to use?
-3. **Style**: intraday vs. swing (days–weeks) vs. long-term rebalancing?
-4. **Strategy ideas**: anything specific you want implemented first?
-5. **Interface**: CLI only, or also a web dashboard / Telegram bot for control?
-6. **Hosting**: local machine, VPS, or cloud?
+- Exact funded-account program and its rules (§4 note).
+- Broker symbol names and contract specs once the MT5 demo/funded account exists.
+- Whether a longer futures dataset (Databento/FirstRate) is worth buying after initial MT5-data backtests.
 
 ## 10. Disclaimer
 
-This is a software project, not financial advice. Algorithmic trading carries real risk of loss; past backtest performance does not guarantee future results.
+A software project, not financial advice. Trading leveraged index CFDs/futures carries a high risk of loss; backtested and demo results do not guarantee future performance.
