@@ -10,10 +10,10 @@ Everything here is free: MT5 for macOS, MetaEditor, the Strategy Tester and a de
 ## 2. Install the bot files
 
 1. Download this repo (GitHub → **Code** → **Download ZIP**, on branch `claude/brave-thompson-89i9te`) and unzip it, or `git clone` it.
-2. Open **Terminal** in the repo folder and run:
+2. Open **Terminal**, type `bash ` (with a space after it), then **drag `install_mac.sh`** from the unzipped folder's `scripts` folder in Finder into the Terminal window (this pastes its full path) and press **Enter**. It should look like:
 
    ```bash
-   bash scripts/install_mac.sh
+   bash /Users/you/Downloads/tradingbot-claude-brave-thompson-89i9te/scripts/install_mac.sh
    ```
 
    If it says the folder wasn't found: in MT5 choose **File → Open Data Folder**, open the `MQL5` folder there, and run the script again with that path in quotes:
