@@ -1,6 +1,6 @@
 # tradingbot
 
-Intraday **VWAP trend pullback** Expert Advisor for MetaTrader 5, trading `NAS100.raw` and `US500.raw` index CFDs.
+Intraday **VWAP trend pullback** Expert Advisor for MetaTrader 5, trading `NAS100` and `US500` index CFDs (`.raw`, `.pro` or no suffix, detected automatically).
 
 - 1 trade per New York day, 1% risk, take profit at 2R, stop loss and take profit set on the server at entry.
 - Entries 10:00–14:30 New York, everything closed at 15:50 New York.

@@ -163,7 +163,30 @@ void AddSymbol(const string symbol)
   {
    int n=ArraySize(g_symbols);
    ArrayResize(g_symbols,n+1);
-   g_symbols[n]=symbol;
+   g_symbols[n]=ResolveSymbol(symbol);
+  }
+
+// Account types name the same CFD differently (NAS100.raw, NAS100.pro, NAS100),
+// so fall back to the other common suffixes when the configured name doesn't exist.
+string ResolveSymbol(const string symbol)
+  {
+   if(SymbolSelect(symbol,true))
+      return symbol;
+   string base=symbol;
+   int dot=StringFind(symbol,".");
+   if(dot>0)
+      base=StringSubstr(symbol,0,dot);
+   string candidates[]={"",".pro",".raw",".r",".m","m"};
+   for(int i=0;i<ArraySize(candidates);i++)
+     {
+      string name=base+candidates[i];
+      if(name!=symbol && SymbolSelect(name,true))
+        {
+         PrintFormat("TradingBot: %s not found, using %s",symbol,name);
+         return name;
+        }
+     }
+   return symbol;
   }
 
 // Compares New York time derived from the computer's clock with the configured server clock.
