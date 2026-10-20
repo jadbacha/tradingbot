@@ -11,7 +11,7 @@ Path to production: **Strategy Tester backtest → demo forward test → funded 
 | Topic | Decision | Why |
 |---|---|---|
 | Strategy | **VWAP trend pullback** (only) | Your choice (§3). |
-| Instruments | NQ + ES index CFDs | Broker symbol names vary (`NAS100`/`US100`/`USTEC`, `US500`/`SPX500`) and are set as EA inputs. |
+| Instruments | NQ + ES index CFDs | Broker Alpha symbols: `NAS100.raw` and `US500.raw` (EA inputs). |
 | Trades | **Max 1 trade per day in total** (across NQ and ES) | Your rule. The first valid signal of the day is taken; the other symbol is ignored for the rest of the day. |
 | Risk / reward | **Risk 1% per trade, take profit at 2% (2R)** | Your rule. Stop loss and take profit are both placed on the broker's server at entry. |
 | Language | **MQL5** (native MT5 EA) | The official `MetaTrader5` Python package only works on Windows. On a Mac the only free, reliable option is an EA running inside MT5 itself. |
@@ -83,15 +83,14 @@ MT5 terminal on your Mac
 ```
 tradingbot/
 ├── MQL5/
-│   ├── Experts/VwapPullbackEA.mq5      # main EA
-│   ├── Include/TradingBot/             # SessionClock, VwapCalc, Strategy, RiskManager,
-│   │                                   # NewsFilter, Executor, Telegram (.mqh)
-│   ├── Indicators/SessionVWAP.mq5      # same VWAP on the chart, for visual checks
-│   └── Scripts/RunTests.mq5            # self-tests for sizing, time conversion, VWAP
-├── presets/                            # .set files with tested EA input values
-├── docs/
-│   ├── SETUP_MAC.md                    # install MT5, copy files, compile, attach, Telegram
-│   └── BACKTEST.md                     # Strategy Tester settings + how to read results
+│   ├── Experts/TradingBot/VwapPullbackEA.mq5   # main EA
+│   ├── Include/TradingBot/                     # SessionClock, Vwap, Strategy, RiskManager,
+│   │                                           # Executor (+ NewsFilter, Telegram later)
+│   ├── Indicators/TradingBot/SessionVWAP.mq5   # same VWAP on the chart, for visual checks
+│   └── Scripts/TradingBot/RunTests.mq5         # self-tests for clock, sizing, VWAP, signals
+├── presets/                                    # .set files with tested EA input values
+├── scripts/install_mac.sh                      # copies MQL5/ into MT5 for macOS
+├── docs/SETUP_MAC.md                           # install, compile, test, demo, backtest
 └── PLAN.md
 ```
 
