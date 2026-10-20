@@ -11,7 +11,7 @@ Path to production: **Strategy Tester backtest → demo forward test → funded 
 | Topic | Decision | Why |
 |---|---|---|
 | Strategy | **VWAP trend pullback** (only) | Your choice (§3). |
-| Instruments | NQ + ES index CFDs | Broker Alpha symbols: `NAS100.raw` and `US500.raw` (EA inputs). |
+| Instruments | NQ + ES index CFDs | Alpha symbols: `NAS100.raw` and `US500.raw` (EA inputs). |
 | Trades | **Max 1 trade per day in total** (across NQ and ES) | Your rule. The first valid signal of the day is taken; the other symbol is ignored for the rest of the day. |
 | Risk / reward | **Risk 1% per trade, take profit at 2% (2R)** | Your rule. Stop loss and take profit are both placed on the broker's server at entry. |
 | Language | **MQL5** (native MT5 EA) | The official `MetaTrader5` Python package only works on Windows. On a Mac the only free, reliable option is an EA running inside MT5 itself. |
