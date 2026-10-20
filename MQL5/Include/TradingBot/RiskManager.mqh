@@ -133,10 +133,16 @@ public:
       return MathAbs(entry-sl)/tickSize*tickValue;
      }
 
-   double            LotsFor(const string symbol,const bool isLong,const double entry,const double sl,
-                             const double riskPct,const double maxLotsCap)
+   // Money at risk per trade: % of the start balance (fixed amount) or of the current balance.
+   double            RiskMoney(const double riskPct,const bool fixedFromStart)
      {
-      double riskMoney=AccountInfoDouble(ACCOUNT_BALANCE)*riskPct/100.0;
+      double base=fixedFromStart ? m_start : AccountInfoDouble(ACCOUNT_BALANCE);
+      return base*riskPct/100.0;
+     }
+
+   double            LotsFor(const string symbol,const bool isLong,const double entry,const double sl,
+                             const double riskMoney,const double maxLotsCap)
+     {
       double maxLot=SymbolInfoDouble(symbol,SYMBOL_VOLUME_MAX);
       if(maxLotsCap>0.0 && maxLotsCap<maxLot)
          maxLot=maxLotsCap;

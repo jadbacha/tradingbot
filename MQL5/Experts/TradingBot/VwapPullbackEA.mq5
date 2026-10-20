@@ -1,17 +1,27 @@
 //+------------------------------------------------------------------+
 //| VwapPullbackEA.mq5                                               |
-//| Intraday VWAP trend pullback on NAS100 + US500 CFDs.             |
-//| One trade per day, 1% risk, 2R target, flat before the close.    |
+//| Intraday NAS100 + US500 CFDs: ICT SMT strategy or VWAP pullback. |
+//| One trade per day, fixed % risk, flat before the close.          |
 //+------------------------------------------------------------------+
 #property copyright "tradingbot"
 #property version   "1.00"
-#property description "VWAP pullback EA: 1 trade/day, fixed % risk, server-side SL/TP, force-close before NY close."
+#property description "ICT SMT / VWAP pullback EA: 1 trade/day, fixed % risk, server-side SL/TP, force-close before NY close."
 
 #include <TradingBot\SessionClock.mqh>
 #include <TradingBot\Vwap.mqh>
 #include <TradingBot\Strategy.mqh>
 #include <TradingBot\RiskManager.mqh>
 #include <TradingBot\Executor.mqh>
+#include <TradingBot\IctStrategy.mqh>
+
+enum ENUM_TB_STRATEGY
+  {
+   STRAT_ICT_SMT  = 0, // ICT: HTF FVG + sweep/SMT + IFVG entry
+   STRAT_VWAP     = 1  // VWAP trend pullback
+  };
+
+input group "Strategy selection"
+input ENUM_TB_STRATEGY InpStrategy       = STRAT_ICT_SMT; // Strategy
 
 input group "Symbols"
 input string           InpSymbol1        = "NAS100.raw"; // Symbol 1 (empty = off)
@@ -27,7 +37,24 @@ input string           InpEntryEnd       = "14:30";     // Last entry (bar close
 input string           InpForceClose     = "15:50";     // Close any open trade
 input bool             InpSkipHolidays   = true;        // No entries on US holidays / early-close days
 
-input group "Strategy"
+input group "ICT strategy"
+input string           InpIctStart       = "09:30"; // ICT: first entry (NY)
+input string           InpIctEnd         = "12:00"; // ICT: last entry (NY)
+input double           InpIctRewardRisk  = 1.5;   // ICT: take profit (R)
+input int              InpIctSwingBars   = 2;     // ICT: swing point strength (bars each side)
+input int              InpIctLegBars     = 120;   // ICT: M1 bars searched for sweep + resweep
+input int              InpIctSweepBars   = 60;    // ICT: a sweep takes the lowest low of this many M1 bars
+input int              InpIctMaxAfterResweep = 20; // ICT: max M1 bars from resweep to entry
+input int              InpIctHtfBars     = 60;    // ICT: bars scanned per higher timeframe
+input double           InpIctMinGapFrac  = 0.1;   // ICT: min HTF gap height (x avg candle)
+input double           InpIctGapProximity= 0.5;   // ICT: sweep may be this far beyond the gap (x avg M15 candle)
+input double           InpIctStopBuffer  = 0.5;   // ICT: stop buffer below sweep low (x avg M1 candle)
+input int              InpIctTargetBars  = 78;    // ICT: M5 bars searched for target swings
+input int              InpIctMinTargets  = 2;     // ICT: min untaken M5 swings above entry
+input double           InpIctTargetMaxR  = 3.0;   // ICT: ... within this many R
+input double           InpIctMaxSpreadFrac = 0.15; // ICT: skip if spread > this fraction of the stop distance
+
+input group "VWAP strategy"
 input int              InpTrendBars      = 12;   // Trend filter: bars checked
 input double           InpTrendMinPct    = 75;   // Trend filter: % of closes on trend side of VWAP
 input int              InpSlopeBars      = 6;    // VWAP slope: lookback bars
@@ -42,15 +69,16 @@ input int              InpAtrPeriod      = 14;   // ATR period
 input double           InpBreakevenR     = 0;    // Move stop to entry after this many R in profit (0 = off)
 
 input group "Risk"
-input double           InpRiskPct        = 1.0;  // Risk per trade (% of balance)
-input double           InpRewardRisk     = 2.0;  // Take profit (multiple of risk)
+input double           InpRiskPct        = 1.0;  // Risk per trade (%)
+input bool             InpFixedRisk      = true; // Risk % of the start balance (fixed $), not the current balance
+input double           InpRewardRisk     = 2.0;  // VWAP: take profit (multiple of risk)
 input int              InpMaxTradesPerDay= 1;    // Max trades per New York day (all symbols)
 input double           InpMaxLots        = 0;    // Max lots per trade (0 = symbol max)
 input double           InpMaxSpreadAtr   = 0.25; // Skip entry if spread > this many ATRs
 input double           InpDailyLossPct   = 3.0;  // Daily guard: flatten + stop at this loss from day start (0 = off)
 input double           InpStartBalance   = 0;    // Drawdown reference balance (0 = balance when first attached)
 input bool             InpTrailingDD     = false; // Drawdown measured from highest balance
-input double           InpDDReducePct    = 4.0;  // Drawdown at which risk is reduced (0 = off)
+input double           InpDDReducePct    = 0;    // Drawdown at which risk is reduced (0 = off)
 input double           InpDDReduceFactor = 0.5;  // Risk multiplier once reduced
 input double           InpDDStopPct      = 8.0;  // Drawdown at which trading stops (0 = off)
 
@@ -64,6 +92,7 @@ CSessionClock     g_clock;
 CRiskManager      g_risk;
 CExecutor         g_exec;
 TB_StrategyParams g_params;
+CIctStrategy      g_ict;
 
 string   g_symbols[];
 int      g_atr[];
@@ -73,6 +102,10 @@ datetime g_dayKey=0;
 double   g_dayStartBalance=0.0;
 bool     g_haltedToday=false;
 datetime g_lastCloseAttempt=0;
+int      g_ictStartMin,g_ictEndMin;
+datetime g_lastIctBar=0;
+string   g_beSymbol="";
+double   g_beLevel=0.0;
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -86,7 +119,14 @@ int OnInit()
       Print("TradingBot: session times must be HH:MM");
       return INIT_PARAMETERS_INCORRECT;
      }
-   if(InpRiskPct<=0.0 || InpRewardRisk<=0.0 || InpTrendBars<1 || InpSlopeBars<1 || InpPullbackBars<1)
+   g_ictStartMin=TB_ParseHHMM(InpIctStart);
+   g_ictEndMin=TB_ParseHHMM(InpIctEnd);
+   if(g_ictStartMin<0 || g_ictEndMin<0)
+     {
+      Print("TradingBot: ICT times must be HH:MM");
+      return INIT_PARAMETERS_INCORRECT;
+     }
+   if(InpRiskPct<=0.0 || InpRewardRisk<=0.0 || InpIctRewardRisk<=0.0 || InpTrendBars<1 || InpSlopeBars<1 || InpPullbackBars<1)
      {
       Print("TradingBot: risk, reward and bar counts must be positive");
       return INIT_PARAMETERS_INCORRECT;
@@ -98,9 +138,9 @@ int OnInit()
    if(InpSymbol2!="")
       AddSymbol(InpSymbol2);
    int n=ArraySize(g_symbols);
-   if(n==0)
+   if(n==0 || (InpStrategy==STRAT_ICT_SMT && n!=2))
      {
-      Print("TradingBot: no symbols configured");
+      Print("TradingBot: configure two symbols for ICT (SMT needs both), at least one for VWAP");
       return INIT_PARAMETERS_INCORRECT;
      }
    ArrayResize(g_atr,n);
@@ -133,6 +173,22 @@ int OnInit()
    g_params.minStopAtr=InpMinStopAtr;
    g_params.maxStopAtr=InpMaxStopAtr;
 
+   TB_IctParams ip;
+   ip.swingStrength=InpIctSwingBars;
+   ip.legLookbackBars=InpIctLegBars;
+   ip.sweepLookbackBars=InpIctSweepBars;
+   ip.maxBarsAfterResweep=InpIctMaxAfterResweep;
+   ip.htfLookbackBars=InpIctHtfBars;
+   ip.minGapFrac=InpIctMinGapFrac;
+   ip.gapProximityFrac=InpIctGapProximity;
+   ip.stopBufferFrac=InpIctStopBuffer;
+   ip.targetLookbackBars=InpIctTargetBars;
+   ip.minTargetSwings=InpIctMinTargets;
+   ip.targetMaxR=InpIctTargetMaxR;
+   ip.rewardRisk=InpIctRewardRisk;
+   g_ict.Init(ip);
+   g_lastIctBar=iTime(g_symbols[0],PERIOD_M1,0);
+
    g_clock.Init(InpClockMode,InpClockHours);
    string prefix=StringFormat("TB_%I64d_%I64u_",AccountInfoInteger(ACCOUNT_LOGIN),InpMagic);
    g_risk.Init(prefix,InpStartBalance,InpTrailingDD,InpDDReducePct,InpDDReduceFactor,InpDDStopPct);
@@ -142,8 +198,9 @@ int OnInit()
       CheckClock();
 
    EventSetTimer(1);
-   PrintFormat("TradingBot: started on %d symbol(s), risk %.2f%%, %.1fR target, max %d trade(s)/day",
-               n,InpRiskPct,InpRewardRisk,InpMaxTradesPerDay);
+   PrintFormat("TradingBot: %s started on %d symbol(s), risk %.2f%% (%s), %.1fR target, max %d trade(s)/day",
+               InpStrategy==STRAT_ICT_SMT ? "ICT SMT" : "VWAP pullback",n,InpRiskPct,
+               InpFixedRisk ? "fixed" : "of balance",TargetR(),InpMaxTradesPerDay);
    return INIT_SUCCEEDED;
   }
 
@@ -158,14 +215,19 @@ void OnDeinit(const int reason)
   }
 
 // Optimizer score ("Custom max"): net profit per unit of max balance drawdown.
-// Runs with too few trades score 0 so a handful of lucky trades can't win.
+// Runs with under 30 trades score 0 so a handful of lucky trades can't win.
 double OnTester()
   {
    double trades=TesterStatistics(STAT_TRADES);
    double dd=TesterStatistics(STAT_BALANCE_DD);
-   if(trades<80 || dd<=0.0)
+   if(trades<30 || dd<=0.0)
       return 0.0;
    return TesterStatistics(STAT_PROFIT)/dd;
+  }
+
+double TargetR()
+  {
+   return InpStrategy==STRAT_ICT_SMT ? InpIctRewardRisk : InpRewardRisk;
   }
 
 void OnTick()  { Process(); }
@@ -227,7 +289,13 @@ void Process()
    int nyMin=TB_MinuteOfDay(ny);
 
    UpdateDailyGuard(now);
-   g_exec.ApplyBreakeven(InpBreakevenR,InpRewardRisk);
+   if(InpStrategy==STRAT_VWAP)
+      g_exec.ApplyBreakeven(InpBreakevenR,InpRewardRisk);
+   else
+      if(g_exec.CountPositions()==0)
+         g_beLevel=0.0;
+      else
+         g_exec.BreakevenAtLevel(g_beSymbol,g_beLevel);
    ManageOpenPositions(now,nyDay,nyMin);
    ShowStatus(ny,nyDay);
 
@@ -235,6 +303,17 @@ void Process()
       return;
    if(InpSkipHolidays && TB_IsUsHolidayOrHalfDay(nyDay))
       return;
+
+   if(InpStrategy==STRAT_ICT_SMT)
+     {
+      datetime m1=iTime(g_symbols[0],PERIOD_M1,0);
+      if(m1==0 || m1==g_lastIctBar)
+         return;
+      g_lastIctBar=m1;
+      if(nyMin>=g_ictStartMin && nyMin<=g_ictEndMin)
+         TryIctEntry(nyDay);
+      return;
+     }
 
    for(int s=0;s<ArraySize(g_symbols);s++)
      {
@@ -288,8 +367,8 @@ void ShowStatus(const datetime ny,const datetime nyDay)
    if(MQLInfoInteger(MQL_TESTER) && !MQLInfoInteger(MQL_VISUAL_MODE))
       return;
    string state=!InpTradingEnabled ? "DISABLED" : (g_haltedToday ? "HALTED for today" : "active");
-   Comment(StringFormat("VWAP Pullback EA - %s\nNew York: %s\nTrades today: %d / %d   Open: %d\nDrawdown: %.2f%%   Risk now: %.2f%%",
-                        state,TimeToString(ny,TIME_DATE|TIME_MINUTES),
+   Comment(StringFormat("%s - %s\nNew York: %s\nTrades today: %d / %d   Open: %d\nDrawdown: %.2f%%   Risk now: %.2f%%",
+                        InpStrategy==STRAT_ICT_SMT ? "ICT SMT EA" : "VWAP Pullback EA",state,TimeToString(ny,TIME_DATE|TIME_MINUTES),
                         g_exec.EntriesSince(g_clock.ToServer(nyDay)),InpMaxTradesPerDay,
                         g_exec.CountPositions(),g_risk.DrawdownPct(),g_risk.EffectiveRiskPct(InpRiskPct)));
   }
@@ -341,55 +420,89 @@ void TryEntry(const int s,const datetime nyDay)
       Skip(sym,sig.reason);
       return;
      }
-   PlaceTrade(sym,sig,atr);
+   PlaceTrade(sym,sig.isLong,sig.stop,InpRewardRisk,InpMaxSpreadAtr*atr,sig.reason,"VWAP pullback");
   }
 
-void PlaceTrade(const string sym,const TB_Signal &sig,const double atr)
+void TryIctEntry(const datetime nyDay)
+  {
+   if(g_exec.CountPositions()>0 || g_exec.EntriesSince(g_clock.ToServer(nyDay))>=InpMaxTradesPerDay)
+      return;
+   for(int t=0;t<2;t++)
+     {
+      string traded=g_symbols[t];
+      string sweeper=g_symbols[1-t];
+      for(int d=0;d<2;d++)
+        {
+         TB_IctSetup setup;
+         string why;
+         if(!g_ict.Find(sweeper,traded,d==0,setup,why))
+           {
+            Skip(traded+(d==0 ? " long" : " short"),why);
+            continue;
+           }
+         double stop=setup.stop;
+         // A short's stop is hit by the ask, so leave room for the spread.
+         if(!setup.isLong)
+            stop+=SymbolInfoDouble(traded,SYMBOL_ASK)-SymbolInfoDouble(traded,SYMBOL_BID);
+         double maxSpread=InpIctMaxSpreadFrac*MathAbs(setup.entryRef-stop);
+         if(PlaceTrade(traded,setup.isLong,stop,InpIctRewardRisk,maxSpread,setup.notes,"ICT SMT"))
+           {
+            g_beSymbol=traded;
+            g_beLevel=setup.beLevel;
+           }
+         return;
+        }
+     }
+  }
+
+bool PlaceTrade(const string sym,const bool isLong,const double stop,const double rewardRisk,
+                const double maxSpread,const string reason,const string comment)
   {
    double bid=SymbolInfoDouble(sym,SYMBOL_BID);
    double ask=SymbolInfoDouble(sym,SYMBOL_ASK);
    if(bid<=0.0 || ask<=0.0)
-      return;
-   if(ask-bid>InpMaxSpreadAtr*atr)
+      return false;
+   if(ask-bid>maxSpread)
      {
       PrintFormat("TradingBot: %s signal skipped, spread %.2f too wide",sym,ask-bid);
-      return;
+      return false;
      }
 
-   double entry=sig.isLong ? ask : bid;
-   double sl=TB_NormalizePrice(sym,sig.stop);
-   double dist=sig.isLong ? entry-sl : sl-entry;
+   double entry=isLong ? ask : bid;
+   double sl=TB_NormalizePrice(sym,stop);
+   double dist=isLong ? entry-sl : sl-entry;
    double minDist=(double)SymbolInfoInteger(sym,SYMBOL_TRADE_STOPS_LEVEL)*SymbolInfoDouble(sym,SYMBOL_POINT);
    if(dist<=0.0 || dist<minDist)
      {
       PrintFormat("TradingBot: %s signal skipped, price already at/through the stop",sym);
-      return;
+      return false;
      }
-   double tp=TB_NormalizePrice(sym,sig.isLong ? entry+InpRewardRisk*dist : entry-InpRewardRisk*dist);
+   double tp=TB_NormalizePrice(sym,isLong ? entry+rewardRisk*dist : entry-rewardRisk*dist);
 
    double riskPct=g_risk.EffectiveRiskPct(InpRiskPct);
    if(riskPct<=0.0)
      {
       PrintFormat("TradingBot: drawdown %.2f%% reached the stop level, trading halted",g_risk.DrawdownPct());
       g_haltedToday=true;
-      return;
+      return false;
      }
-   double lots=g_risk.LotsFor(sym,sig.isLong,entry,sl,riskPct,InpMaxLots);
+   double riskMoney=g_risk.RiskMoney(riskPct,InpFixedRisk);
+   double lots=g_risk.LotsFor(sym,isLong,entry,sl,riskMoney,InpMaxLots);
    if(lots<=0.0)
      {
-      PrintFormat("TradingBot: %s signal skipped, %.2f%% risk is below the minimum lot",sym,riskPct);
-      return;
+      PrintFormat("TradingBot: %s signal skipped, %.2f risk is below the minimum lot",sym,riskMoney);
+      return false;
      }
    double margin=0.0;
-   if(OrderCalcMargin(sig.isLong ? ORDER_TYPE_BUY : ORDER_TYPE_SELL,sym,lots,entry,margin) &&
+   if(OrderCalcMargin(isLong ? ORDER_TYPE_BUY : ORDER_TYPE_SELL,sym,lots,entry,margin) &&
       margin>AccountInfoDouble(ACCOUNT_MARGIN_FREE))
      {
       PrintFormat("TradingBot: %s signal skipped, not enough free margin for %.2f lots",sym,lots);
-      return;
+      return false;
      }
 
-   PrintFormat("TradingBot: %s %s %.2f lots @ %.2f SL %.2f TP %.2f (risk %.2f%%) - %s",
-               sig.isLong ? "BUY" : "SELL",sym,lots,entry,sl,tp,riskPct,sig.reason);
-   g_exec.Open(sym,sig.isLong,lots,sl,tp,"VWAP pullback");
+   PrintFormat("TradingBot: %s %s %.2f lots @ %.2f SL %.2f TP %.2f (risk %.2f) - %s",
+               isLong ? "BUY" : "SELL",sym,lots,entry,sl,tp,riskMoney,reason);
+   return g_exec.Open(sym,isLong,lots,sl,tp,comment);
   }
 //+------------------------------------------------------------------+

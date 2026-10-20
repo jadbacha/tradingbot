@@ -115,6 +115,28 @@ public:
         }
      }
 
+   // Move the stop to entry once price reaches a given level (e.g. an opposing gap).
+   void              BreakevenAtLevel(const string symbol,const double level)
+     {
+      if(level<=0.0)
+         return;
+      for(int i=PositionsTotal()-1;i>=0;i--)
+        {
+         ulong ticket=PositionGetTicket(i);
+         if(!IsOurs(ticket) || PositionGetString(POSITION_SYMBOL)!=symbol)
+            continue;
+         double open=PositionGetDouble(POSITION_PRICE_OPEN);
+         double sl=PositionGetDouble(POSITION_SL);
+         bool isLong=PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY;
+         bool reached=isLong ? SymbolInfoDouble(symbol,SYMBOL_BID)>=level : SymbolInfoDouble(symbol,SYMBOL_ASK)<=level;
+         bool alreadyDone=isLong ? sl>=open : (sl>0.0 && sl<=open);
+         if(!reached || alreadyDone)
+            continue;
+         if(m_trade.PositionModify(ticket,open,PositionGetDouble(POSITION_TP)))
+            PrintFormat("TradingBot: #%I64u reached opposing gap %.2f, stop moved to entry",ticket,level);
+        }
+     }
+
    int               CloseAll(const string reason)
      {
       int closed=0;

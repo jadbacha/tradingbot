@@ -10,6 +10,7 @@
 #include <TradingBot\Vwap.mqh>
 #include <TradingBot\Strategy.mqh>
 #include <TradingBot\RiskManager.mqh>
+#include <TradingBot\Fvg.mqh>
 
 int g_pass=0;
 int g_fail=0;
@@ -157,12 +158,52 @@ void TestStrategy()
    Check(!TB_EvaluateSignal(r,v,18,1.0,p,sig),"no signal in flat market");
   }
 
+void TestFvg()
+  {
+   MqlRates r[];
+   ArrayResize(r,5);
+   MakeBar(r[0],9.5,10,9,9.8);
+   MakeBar(r[1],10,13,10,12.8);
+   MakeBar(r[2],12.8,14,12,13.5);  // gap between r[0].high=10 and r[2].low=12
+   MakeBar(r[3],13.5,13.6,11.5,13);// dips into the gap, holds
+   MakeBar(r[4],13,13.2,8.5,9);    // closes below the gap
+   for(int i=0;i<5;i++)
+      r[i].time=TB_MakeTime(2026,7,15,10,i);
+
+   TB_Fvg g[];
+   Check(TB_FindFvgs(r,3,0.0,g)==1 && g[0].bullish && Near(g[0].bottom,10) && Near(g[0].top,12),"bullish FVG found");
+   Check(TB_FindFvgs(r,3,2.5,g)==0,"FVG below min size ignored");
+   Check(TB_FvgBias(r,4,0.0)==1,"respected bullish FVG -> bullish bias");
+   Check(TB_FvgBias(r,5,0.0)==-1,"disrespected bullish FVG -> bearish bias");
+   TB_FindFvgs(r,5,0.0,g);
+   Check(TB_FvgBreakIndex(r,5,g[0])==4,"FVG break index");
+
+   MqlRates m[];
+   ArrayCopy(m,r);
+   TB_Mirror(m,3);
+   Check(TB_FindFvgs(m,3,0.0,g)==1 && !g[0].bullish,"mirrored bullish gap is bearish");
+
+   double lows[]={5,4,3,4,5};
+   MqlRates sw[];
+   ArrayResize(sw,5);
+   for(int i=0;i<5;i++)
+     {
+      MakeBar(sw[i],lows[i]+1,lows[i]+2,lows[i],lows[i]+1);
+      sw[i].time=TB_MakeTime(2026,7,15,10,i);
+     }
+   Check(TB_IsSwingLow(sw,5,2,2) && !TB_IsSwingLow(sw,5,1,2),"swing low");
+   Check(TB_LowestIndex(sw,0,4)==2 && TB_HighestIndex(sw,0,4)==0,"lowest/highest index");
+   Check(TB_IndexAtOrAfter(sw,5,TB_MakeTime(2026,7,15,10,2))==2,"index at time");
+   Check(TB_IndexAtOrAfter(sw,5,TB_MakeTime(2026,7,15,11,0))==5,"index past the end");
+  }
+
 void OnStart()
   {
    TestClock();
    TestRisk();
    TestVwap();
    TestStrategy();
+   TestFvg();
    PrintFormat("TradingBot tests: %d passed, %d failed",g_pass,g_fail);
    if(g_fail==0)
       Print("TradingBot tests: ALL PASSED");
