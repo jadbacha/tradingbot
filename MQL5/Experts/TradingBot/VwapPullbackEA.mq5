@@ -4,7 +4,7 @@
 //| One trade per day, 1% risk, 2R target, flat before the close.    |
 //+------------------------------------------------------------------+
 #property copyright "tradingbot"
-#property version   "0.1"
+#property version   "1.00"
 #property description "VWAP pullback EA: 1 trade/day, fixed % risk, server-side SL/TP, force-close before NY close."
 
 #include <TradingBot\SessionClock.mqh>

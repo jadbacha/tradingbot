@@ -4,7 +4,7 @@
 //| Uses the same clock and VWAP formula as the EA.                  |
 //+------------------------------------------------------------------+
 #property copyright "tradingbot"
-#property version   "0.1"
+#property version   "1.00"
 #property indicator_chart_window
 #property indicator_buffers 6
 #property indicator_plots   3

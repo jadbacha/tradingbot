@@ -4,7 +4,7 @@
 //| and read the results in the Toolbox "Experts" tab.               |
 //+------------------------------------------------------------------+
 #property copyright "tradingbot"
-#property version   "0.1"
+#property version   "1.00"
 
 #include <TradingBot\SessionClock.mqh>
 #include <TradingBot\Vwap.mqh>
