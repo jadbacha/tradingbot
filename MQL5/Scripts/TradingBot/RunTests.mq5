@@ -58,6 +58,17 @@ void TestClock()
    Check(TB_DayStart(TB_MakeTime(2026,7,15,9,30))==TB_MakeTime(2026,7,15),"day start");
    Check(TB_ParseHHMM("15:50")==950,"parse HH:MM");
    Check(TB_ParseHHMM("bad")==-1,"parse rejects garbage");
+
+   Check(TB_EasterSunday(2026)==TB_MakeTime(2026,4,5),"Easter 2026");
+   Check(TB_LastWeekday(2026,5,1)==25,"last Monday of May 2026");
+   Check(TB_IsUsHolidayOrHalfDay(TB_MakeTime(2026,4,3)),"Good Friday 2026");
+   Check(TB_IsUsHolidayOrHalfDay(TB_MakeTime(2026,1,19)),"MLK Day 2026");
+   Check(TB_IsUsHolidayOrHalfDay(TB_MakeTime(2026,11,26)),"Thanksgiving 2026");
+   Check(TB_IsUsHolidayOrHalfDay(TB_MakeTime(2026,11,27)),"day after Thanksgiving 2026");
+   Check(TB_IsUsHolidayOrHalfDay(TB_MakeTime(2026,7,3)),"July 4th observed on Friday 2026");
+   Check(TB_IsUsHolidayOrHalfDay(TB_MakeTime(2025,12,24)),"Christmas Eve 2025");
+   Check(!TB_IsUsHolidayOrHalfDay(TB_MakeTime(2026,10,20)),"normal Tuesday");
+   Check(!TB_IsUsHolidayOrHalfDay(TB_MakeTime(2026,11,25)),"day before Thanksgiving");
   }
 
 void TestRisk()

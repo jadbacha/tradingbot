@@ -86,6 +86,35 @@ public:
         }
      }
 
+   // Once a position is triggerR x its initial risk in profit, move its stop to the entry price.
+   // Initial risk is recovered from the take profit (TP distance = rewardRisk x risk).
+   void              ApplyBreakeven(const double triggerR,const double rewardRisk)
+     {
+      if(triggerR<=0.0 || rewardRisk<=0.0)
+         return;
+      for(int i=PositionsTotal()-1;i>=0;i--)
+        {
+         ulong ticket=PositionGetTicket(i);
+         if(!IsOurs(ticket))
+            continue;
+         string symbol=PositionGetString(POSITION_SYMBOL);
+         double open=PositionGetDouble(POSITION_PRICE_OPEN);
+         double sl=PositionGetDouble(POSITION_SL);
+         double tp=PositionGetDouble(POSITION_TP);
+         if(tp==0.0)
+            continue;
+         double risk=MathAbs(tp-open)/rewardRisk;
+         bool isLong=PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY;
+         double price=isLong ? SymbolInfoDouble(symbol,SYMBOL_BID) : SymbolInfoDouble(symbol,SYMBOL_ASK);
+         bool reached=isLong ? price-open>=triggerR*risk : open-price>=triggerR*risk;
+         bool alreadyDone=isLong ? sl>=open : (sl>0.0 && sl<=open);
+         if(!reached || alreadyDone)
+            continue;
+         if(m_trade.PositionModify(ticket,open,tp))
+            PrintFormat("TradingBot: #%I64u stop moved to entry %.2f",ticket,open);
+        }
+     }
+
    int               CloseAll(const string reason)
      {
       int closed=0;

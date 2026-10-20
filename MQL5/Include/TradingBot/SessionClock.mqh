@@ -24,13 +24,32 @@ datetime TB_MakeTime(const int year,const int mon,const int day,const int hour=0
    return StructToTime(s);
   }
 
-// Day of month of the n-th Sunday (n >= 1) of the given month.
-int TB_NthSunday(const int year,const int mon,const int n)
+int TB_DayOfWeek(const datetime t)
   {
    MqlDateTime s;
-   TimeToStruct(TB_MakeTime(year,mon,1),s);
-   int first=1+(7-s.day_of_week)%7;
+   TimeToStruct(t,s);
+   return s.day_of_week;
+  }
+
+// Day of month of the n-th given weekday (0 = Sunday, n >= 1) of the month.
+int TB_NthWeekday(const int year,const int mon,const int dow,const int n)
+  {
+   int first=1+(dow-TB_DayOfWeek(TB_MakeTime(year,mon,1))+7)%7;
    return first+7*(n-1);
+  }
+
+// Day of month of the last given weekday of the month.
+int TB_LastWeekday(const int year,const int mon,const int dow)
+  {
+   datetime last=(mon==12 ? TB_MakeTime(year+1,1,1) : TB_MakeTime(year,mon+1,1))-86400;
+   MqlDateTime s;
+   TimeToStruct(last,s);
+   return s.day-(s.day_of_week-dow+7)%7;
+  }
+
+int TB_NthSunday(const int year,const int mon,const int n)
+  {
+   return TB_NthWeekday(year,mon,0,n);
   }
 
 // US daylight saving: 2nd Sunday of March 07:00 UTC to 1st Sunday of November 06:00 UTC.
@@ -62,6 +81,51 @@ int TB_MinuteOfDay(const datetime t)
 datetime TB_DayStart(const datetime t)
   {
    return (datetime)((long)t-(long)t%86400);
+  }
+
+// Easter Sunday (anonymous Gregorian algorithm).
+datetime TB_EasterSunday(const int y)
+  {
+   int a=y%19,b=y/100,c=y%100,d=b/4,e=b%4,f=(b+8)/25,g=(b-f+1)/3;
+   int h=(19*a+b-d-g+15)%30,i=c/4,k=c%4,l=(32+2*e+2*i-h-k)%7,m=(a+11*h+22*l)/451;
+   return TB_MakeTime(y,(h+l-7*m+114)/31,(h+l-7*m+114)%31+1);
+  }
+
+// Fixed-date holiday moved to Friday/Monday when it falls on a weekend.
+datetime TB_Observed(const int year,const int mon,const int day)
+  {
+   datetime t=TB_MakeTime(year,mon,day);
+   int dow=TB_DayOfWeek(t);
+   if(dow==6)
+      return t-86400;
+   if(dow==0)
+      return t+86400;
+   return t;
+  }
+
+// US stock market holidays and early-close days (New York date). Index CFDs close
+// early or trade thin on these days, so the bot doesn't open new trades.
+bool TB_IsUsHolidayOrHalfDay(const datetime nyDay)
+  {
+   datetime day=TB_DayStart(nyDay);
+   MqlDateTime s;
+   TimeToStruct(day,s);
+   int y=s.year;
+   datetime thanksgiving=TB_MakeTime(y,11,TB_NthWeekday(y,11,4,4));
+   // A Saturday Jan 1 maps to Dec 31 of the previous year, which never matches: NYSE doesn't close then.
+   return day==TB_Observed(y,1,1)
+          || day==TB_MakeTime(y,1,TB_NthWeekday(y,1,1,3))   // Martin Luther King Jr. Day
+          || day==TB_MakeTime(y,2,TB_NthWeekday(y,2,1,3))   // Presidents' Day
+          || day==TB_EasterSunday(y)-2*86400                // Good Friday
+          || day==TB_MakeTime(y,5,TB_LastWeekday(y,5,1))    // Memorial Day
+          || day==TB_Observed(y,6,19)                       // Juneteenth
+          || day==TB_Observed(y,7,4)                        // Independence Day
+          || day==TB_MakeTime(y,9,TB_NthWeekday(y,9,1,1))   // Labor Day
+          || day==thanksgiving
+          || day==TB_Observed(y,12,25)                      // Christmas
+          || day==thanksgiving+86400                        // early close
+          || day==TB_MakeTime(y,7,3)                        // early close
+          || day==TB_MakeTime(y,12,24);                     // early close
   }
 
 // "HH:MM" -> minutes after midnight, or -1 if malformed.

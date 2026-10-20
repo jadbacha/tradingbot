@@ -22,9 +22,10 @@ input group "Session (New York time)"
 input ENUM_CLOCK_MODE  InpClockMode      = CLOCK_NY_OFFSET; // How server time relates to New York
 input int              InpClockHours     = 7;           // Hours (server minus NY, or server GMT offset)
 input string           InpSessionStart   = "09:30";     // VWAP anchor
-input string           InpEntryStart     = "10:00";     // First entry (bar close time)
+input int              InpEntryDelayMin  = 30;          // First entry: minutes after VWAP anchor (bar close time)
 input string           InpEntryEnd       = "14:30";     // Last entry (bar close time)
 input string           InpForceClose     = "15:50";     // Close any open trade
+input bool             InpSkipHolidays   = true;        // No entries on US holidays / early-close days
 
 input group "Strategy"
 input int              InpTrendBars      = 12;   // Trend filter: bars checked
@@ -38,6 +39,7 @@ input double           InpStopBufferAtr  = 0.1;  // Stop: buffer beyond pullback
 input double           InpMinStopAtr     = 0.5;  // Stop: minimum distance (ATR)
 input double           InpMaxStopAtr     = 3.0;  // Stop: maximum distance, else skip (ATR)
 input int              InpAtrPeriod      = 14;   // ATR period
+input double           InpBreakevenR     = 0;    // Move stop to entry after this many R in profit (0 = off)
 
 input group "Risk"
 input double           InpRiskPct        = 1.0;  // Risk per trade (% of balance)
@@ -76,10 +78,10 @@ datetime g_lastCloseAttempt=0;
 int OnInit()
   {
    g_sessionStartMin=TB_ParseHHMM(InpSessionStart);
-   g_entryStartMin=TB_ParseHHMM(InpEntryStart);
+   g_entryStartMin=g_sessionStartMin+InpEntryDelayMin;
    g_entryEndMin=TB_ParseHHMM(InpEntryEnd);
    g_forceCloseMin=TB_ParseHHMM(InpForceClose);
-   if(g_sessionStartMin<0 || g_entryStartMin<0 || g_entryEndMin<0 || g_forceCloseMin<0)
+   if(g_sessionStartMin<0 || InpEntryDelayMin<0 || g_entryEndMin<0 || g_forceCloseMin<0)
      {
       Print("TradingBot: session times must be HH:MM");
       return INIT_PARAMETERS_INCORRECT;
@@ -155,6 +157,17 @@ void OnDeinit(const int reason)
    Comment("");
   }
 
+// Optimizer score ("Custom max"): net profit per unit of max balance drawdown.
+// Runs with too few trades score 0 so a handful of lucky trades can't win.
+double OnTester()
+  {
+   double trades=TesterStatistics(STAT_TRADES);
+   double dd=TesterStatistics(STAT_BALANCE_DD);
+   if(trades<80 || dd<=0.0)
+      return 0.0;
+   return TesterStatistics(STAT_PROFIT)/dd;
+  }
+
 void OnTick()  { Process(); }
 void OnTimer() { Process(); }
 
@@ -214,10 +227,13 @@ void Process()
    int nyMin=TB_MinuteOfDay(ny);
 
    UpdateDailyGuard(now);
+   g_exec.ApplyBreakeven(InpBreakevenR,InpRewardRisk);
    ManageOpenPositions(now,nyDay,nyMin);
    ShowStatus(ny,nyDay);
 
    if(!InpTradingEnabled || g_haltedToday)
+      return;
+   if(InpSkipHolidays && TB_IsUsHolidayOrHalfDay(nyDay))
       return;
 
    for(int s=0;s<ArraySize(g_symbols);s++)
